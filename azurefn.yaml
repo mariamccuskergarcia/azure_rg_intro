@@ -1,0 +1,88 @@
+name: $(TeamProject)_$(BuildDefinitionName)_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+  - name: TerraformVersion
+    displayName: Terraform Version
+    type: string
+    values:
+      - 1.2.8
+    default: 1.2.8
+  - name: PythonVersion
+    displayName: Python Version
+    type: string
+    values:
+      - 3.7
+      - 3.8
+      - 3.10
+    default: 3.10
+  - name: TerraformDestroy
+    displayName: Run Terraform Destroy
+    type: boolean
+    default: false
+trigger:
+  - main
+
+variables:
+  - group: ce06-Azure-Terraform-dev
+  - name: Azure.Backend
+    value: "ce06-Azure-Terraform-dev"
+
+stages:
+  - stage: azure
+    displayName: "Create ASE Accounts"
+    variables:
+      - name: Stage.Statefile
+        value: "$(System.TeamProject)_$(Build.DefinitionName)_$(System.StageName)"
+    jobs:
+      - template: templates/jobs/shift_left.yaml
+        parameters:
+          PythonVersion: "${{ parameters.PythonVersion }}"
+          workingDirectory: "tests/ci"
+          name: "shift_left"
+      - job: sbx
+        timeoutInMinutes: 60
+        dependsOn: shift_left
+        displayName: "Create ASE"
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - task: TerraformInstaller@0
+            inputs:
+              terraformVersion: "${{ parameters.TerraformVersion }}"
+          - task: TerraformTaskV2@2
+            inputs:
+              provider: "azurerm"
+              command: "init"
+              backendServiceArm: "$(Azure.Backend)"
+              backendAzureRmResourceGroupName: "$(Tf.ResourceGroup)"
+              backendAzureRmStorageAccountName: "$(Tf.StorageAccount)"
+              backendAzureRmContainerName: "$(Tf.StorageContainer)"
+              backendAzureRmKey: "$(Stage.Statefile)"
+            displayName: "Terraform init"
+
+          - task: TerraformTaskV2@2
+            inputs:
+              provider: "azurerm"
+              command: "plan"
+              commandOptions: '-var-file=".\config\common.tfvars" -var-file=".\config\cohort.tfvars" -out=plan.tfplan'
+              environmentServiceNameAzureRM: "$(Azure.Backend)"
+            displayName: "Terraform plan"
+            condition: eq('${{ parameters.TerraformDestroy }}', false)
+
+          - task: TerraformTaskV2@2
+            inputs:
+              provider: "azurerm"
+              command: "apply"
+              commandOptions: "plan.tfplan"
+              environmentServiceNameAzureRM: "$(Azure.Backend)"
+            displayName: "Terraform apply"
+            condition: eq('${{ parameters.TerraformDestroy }}', false)
+
+          - task: TerraformTaskV2@2
+            inputs:
+              provider: "azurerm"
+              command: "destroy"
+              commandOptions: '-var-file=".\config\common.tfvars" -var-file=".\config\cohort.tfvars"'
+              environmentServiceNameAzureRM: "$(Azure.Backend)"
+            displayName: "Terraform destroy"
+            condition: eq('${{ parameters.TerraformDestroy }}', true)
